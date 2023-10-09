@@ -34,6 +34,7 @@ library(tidyverse)
 library(bbsBayes2)
 library(terra)
 library(sf)
+library(patchwork)
 
 ```
 
@@ -50,6 +51,18 @@ abd_seasonal_percent <- load_raster(path, product = "percent-population",
                                  period = "seasonal", #metric = "mean", 
                                  resolution = "hr") #3km high resolution
 abd_breeding_percent <- abd_seasonal_percent$breeding
+
+abd_seasonal_abundance <- load_raster(path, product = "abundance", 
+                                 period = "seasonal", metric = "mean", 
+                                 resolution = "hr") #3km high resolution
+abd_breeding_abundance <- abd_seasonal_abundance$breeding
+
+
+abd_seasonal_abundance_max <- load_raster(path, product = "abundance", 
+                                 period = "seasonal", metric = "max", 
+                                 resolution = "hr") #3km high resolution
+abd_breeding_abundance_max <- abd_seasonal_abundance_max$breeding
+
 
 ```
 
@@ -69,17 +82,90 @@ percent_strata <- extract(abd_breeding_percent,
                           na.rm = TRUE) %>% 
   mutate(strata_name = latlong$strata_name)
 
+abundance_strata <- extract(abd_breeding_abundance,
+                          latlong,
+                          fun = sum,
+                          na.rm = TRUE) %>% 
+  mutate(strata_name = latlong$strata_name)
+
+
+abundance_max_strata <- extract(abd_breeding_abundance_max,
+                          latlong,
+                          fun = sum,
+                          na.rm = TRUE) %>% 
+  mutate(strata_name = latlong$strata_name)
+
 map_percent_strata <- latlong_orig %>% 
   inner_join(.,percent_strata,
              by = "strata_name") %>% 
   filter(!is.na(breeding),
          breeding > 0)
 
-map <- ggplot()+
+
+map_abundance_strata <- latlong_orig %>% 
+  inner_join(.,abundance_strata,
+             by = "strata_name") %>% 
+  filter(!is.na(breeding),
+         breeding > 0)
+
+map_abundance_max_strata <- latlong_orig %>% 
+  inner_join(.,abundance_max_strata,
+             by = "strata_name") %>% 
+  filter(!is.na(breeding),
+         breeding > 0)
+
+
+map_percent <- ggplot()+
   geom_sf(data = map_percent_strata,
           aes(fill = breeding))
+map_abundance <- ggplot()+
+  geom_sf(data = map_abundance_strata,
+          aes(fill = breeding))
+map_abundance_max <- ggplot()+
+  geom_sf(data = map_abundance_max_strata,
+          aes(fill = breeding))
 
-map
+print(map_percent + map_abundance + map_abundance_max)
 
+
+```
+
+### mismatches in range through time
+
+```{r}
+
+bbs_range <- stratify(species,by = "latlong") %>% 
+  prepare_data(.,
+               min_n_routes = 1,
+               min_max_route_years = 1) 
+strata_w_bbs <- bbs_range$meta_strata %>% 
+  select(strata_name) %>% 
+  mutate(bbs = TRUE)
+
+strata_w_eBird <- percent_strata %>% 
+  filter(breeding > 0) %>% 
+  select(strata_name, breeding) %>% 
+  mutate(ebird = TRUE)
+
+strata_w_either <- full_join(strata_w_bbs,
+                             strata_w_eBird,
+                             by = "strata_name") %>% 
+  mutate(ebird = ifelse(is.na(ebird),FALSE,ebird),
+         bbs = ifelse(is.na(bbs),FALSE,bbs),
+         survey = ifelse(ebird,"ebird","bbs"),
+         survey = ifelse(ebird & bbs,"both",survey))
+
+map_strata_w_either = latlong_orig %>% 
+  inner_join(strata_w_either,
+             by = "strata_name")
+
+overlap_map <- ggplot()+
+  geom_sf(data = load_map("bbs_usgs"),
+          fill = NA)+
+  geom_sf(data = map_strata_w_either,
+          aes(fill = survey))+
+  scale_colour_viridis_d()
+
+overlap_map
 ```
 
