@@ -1,0 +1,253 @@
+---
+title: "Seasonal population distribution"
+format: pdf
+editor: visual
+---
+
+## Proportion of species' range by season
+
+The goal is to use eBird status and trend results to calculate the proportion of a species range that is covered by a given monitoring program.
+
+-   seasonal range calculated using
+
+    -   eBird range maps by season
+
+    -   Audubon migration tool includes cumulative range maps that combine eBird with other range map estimates.
+
+    -   Breeding season, consider Boreal Avian Modeling estimates of breeding season population with some (as of yet undefined) threshold cut-off in modeled abundance.
+
+-   using a 1-degree lat x long grid for now, but worth re-visiting.
+
+-   method assumes a relatively stationary population during a survey-season (breeding season or non-breeding season, but not applicable to migration monitoring yet)
+
+-   method also assumes that the current distribution/abundance map encompasses the species distribution in 1966.
+
+    -   Note: If the species' range has shifted, areas with monitoring data 50-years ago but no modeled abundance today will be difficult to deal with...
+
+-   starting with BBS survey information, but anticipating a potential application to Christmas Bird Count, eBird trends, and other surveys.
+
+-   Will require a clear taxonomic alignment across various surveys
+
+## downloading eBird range maps
+
+```{r, message=FALSE, warning=FALSE}
+library(ebirdst)
+library(tidyverse)
+library(bbsBayes2)
+library(terra)
+library(sf)
+library(patchwork)
+
+```
+
+##Example extraction for Connecticut Warbler
+
+Download species data and load seasonal mean abundance
+
+```{r}
+
+species <- "Canada Warbler"
+
+ebirdst_download_status(species,
+                        download_all = TRUE)
+
+
+abd_seasonal_range <- load_ranges(species = species, #metric = "mean", 
+                                 resolution = "27km") #3km high resolution
+
+season_sel <- "breeding"
+
+abd_range <- abd_seasonal_range %>% 
+  filter(season == season_sel)
+
+tst <- ggplot()+
+  geom_sf(data = abd_range)
+tst
+
+```
+
+Select the hexagons that are within the range, and measure the proportion of the hexagons that fall within the species' range.
+
+```{r, message=FALSE, warning=FALSE}
+
+hex_grid <- readRDS("data/hexagonal_grid_west_hemisphere_120km.rds") %>% 
+  rename(strata_name = hex_name) 
+
+
+abd_range <- abd_range %>% 
+  st_transform(.,crs = st_crs(hex_grid))
+hex_range <- st_intersection(abd_range,hex_grid) 
+
+hex_range <- hex_range %>% 
+  mutate(area_km2 = as.numeric(st_area(hex_range)/1e6))
+
+strata_w_eBird_range <- hex_range %>% 
+  select(strata_name) %>% 
+  mutate(ebird = TRUE)
+
+
+tst <- ggplot()+
+  geom_sf(data = hex_range,
+          aes(fill = area_km2))
+
+tst
+
+
+
+```
+
+Load the BBS data for this species and match it to the hexagons.
+
+```{r,message=FALSE, warning=FALSE}
+
+bbs_range_strat <- stratify(species,by = "hexagons",
+                      strata_custom = hex_grid,
+                      return_omitted = TRUE) 
+
+bbs_range <- prepare_data(bbs_range_strat,
+               min_n_routes = 1,
+               min_max_route_years = 1) 
+
+strata_w_bbs <- bbs_range$meta_strata %>% 
+  select(strata_name) %>% 
+  mutate(bbs = TRUE)
+
+strata_bbs_map <- hex_grid %>% 
+  filter(strata_name %in% strata_w_bbs$strata_name)
+
+tst <- ggplot()+
+  geom_sf(data = hex_range,
+          fill = "blue")+
+  geom_sf(data = strata_bbs_map,
+          colour = "red",
+          fill = NA)
+tst
+```
+
+### mismatches in range through time
+
+There are some important mismatches between the eBird breeding range and the BBS breeding range (i.e., the regions with BBS observations). These may reflect changes in the species' breeding range through time or differences in the seasonal scope of the monitoring program and the eBird range layer.
+
+```{r, message=FALSE, warning=FALSE}
+
+
+
+strata_w_either <- full_join(strata_w_bbs,
+                             strata_w_eBird_range,
+                             by = "strata_name") %>% 
+  mutate(ebird = ifelse(is.na(ebird),FALSE,ebird),
+         bbs = ifelse(is.na(bbs),FALSE,bbs),
+         survey = ifelse(ebird,"ebird","bbs"),
+         survey = ifelse(ebird & bbs,"both",survey))
+
+map_strata_w_either = hex_grid %>% 
+  inner_join(strata_w_either,
+             by = "strata_name")
+bas_map_plot <- load_map("bbs_usgs") %>% 
+  st_transform(.,crs = st_crs(map_strata_w_either))
+overlap_map <- ggplot()+
+  geom_sf(data = bas_map_plot,
+          fill = NA)+
+  geom_sf(data = map_strata_w_either,
+          aes(fill = survey))+
+  scale_colour_viridis_d(aesthetics = "fill")+
+  labs(subtitle = paste(species,"strata with BBS observations and eBird \n breeding season relative abundance estimates"))+
+  theme(plot.subtitle = element_text(size = 8))
+
+overlap_map
+```
+
+### Reconcile
+
+One approach to reconciling the two sources of information is to assume that any grid-cell with observations from either source is part of the species' range, and that any cell that intersects either the range map or observations from a the monitoring is part of the species' range.
+
+However, this will likely generate artifacts of low coverage at the edge of a species' range.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+
+# assuming full range and coverage in each grid-cell
+coverage <- hex_grid %>% 
+  inner_join(strata_w_either,
+             by = "strata_name") %>% 
+  mutate(covered = ifelse(survey %in% c("both","bbs"),
+                          TRUE,FALSE)) 
+
+
+coverage_sum <- coverage %>% 
+  st_drop_geometry() %>% 
+  ungroup() %>% 
+  group_by(covered) %>% 
+  summarise(area_km2 = sum(area_km2))
+covered <- coverage_sum %>% 
+  filter(covered) %>% 
+  select(area_km2) %>% 
+  unlist()
+uncovered <- coverage_sum %>% 
+  filter(!covered) %>% 
+  select(area_km2) %>% 
+  unlist()
+cov_overall <- signif(covered/sum(covered,uncovered),3)
+cov_cap <- paste(species,"coverage =",cov_overall*100,"% based on land area  \n of cells covered vs uncovered.",
+"Assuming that any grid cell with monitoring \n data is completely covered and any remaining grid cells \n that overlap with the species' range map \n are included in the uncovered range")
+simple_coverage <- ggplot()+
+  geom_sf(data = coverage,
+          aes(fill = covered))+
+  labs(caption = cov_cap)+
+  scale_fill_viridis_d()
+simple_coverage
+
+```
+
+Alternatively, we could limit the strata considered within the species' range based on some threshold proportion of overlap between the grid cell and the species' range. For example, below I've used 0.25 (25%).
+
+```{r,message=FALSE, warning=FALSE, echo=FALSE}
+
+min_p_area <- 0.25
+
+# area of range according to eBird
+full_hex_w_range <- hex_grid %>% 
+  rename(area_km2_stratum = area_km2) %>% 
+  filter(strata_name %in% strata_w_either$strata_name)
+
+
+full_hex_in_range <- st_intersection(full_hex_w_range,
+                             abd_range) %>% 
+  select(strata_name,area_km2_stratum)
+
+p_area_in_range <- full_hex_in_range %>% 
+  mutate(area_km2_in_range = as.numeric(st_area(full_hex_in_range)/1e6),
+         range = "inside",
+         p_area_in_range = area_km2_in_range/area_km2_stratum) %>% 
+  st_drop_geometry() %>% 
+  select(strata_name,range,p_area_in_range)
+
+drop_outside_range <- p_area_in_range %>% 
+  filter(p_area_in_range < min_p_area)
+
+coverage_alt <- coverage %>% 
+  filter(survey %in% c("both","bbs") |
+           !(survey == "ebird" & strata_name %in% drop_outside_range$strata_name))
+
+coverage_sum <- coverage_alt %>% 
+  st_drop_geometry() %>% 
+  ungroup() %>% 
+  group_by(covered) %>% 
+  summarise(area_km2 = sum(area_km2))
+covered <- coverage_sum %>% 
+  filter(covered) %>% 
+  select(area_km2) %>% 
+  unlist()
+uncovered <- coverage_sum %>% 
+  filter(!covered) %>% 
+  select(area_km2) %>% 
+  unlist()
+cov_overall <- signif(covered/sum(covered,uncovered),3)
+cov_cap <- paste(species,"coverage =",cov_overall*100,"% based on land area \n  of cells covered vs uncovered.",
+"Assuming that any grid cell with  \n monitoring data is completely covered and only grid cells \n with >",(1-min_p_area)*100,"% overlap with the species'  \n range map are included in the uncovered range")
+alt_coverage <- ggplot()+
+  geom_sf(data = coverage_alt,
+          aes(fill = covered))+
+  labs(caption = cov_cap)+
+  scale_fill_viridis_d()
+alt_coverage
+```

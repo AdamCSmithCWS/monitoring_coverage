@@ -1,0 +1,334 @@
+---
+title: "Seasonal population distribution"
+format: pdf
+editor: visual
+---
+
+## Proportion of population by season
+
+The goal is to use eBird status and trend results to calculate the proportion of a species population that is covered by a given monitoring program.
+
+-   seasonal population distribution calculated using
+
+    -   eBird relative abundance maps by season
+
+    -   Boreal Avian Modeling estimates of breeding season population for some Northern species that may be poorly covered by eBird.
+
+-   using a 1-degree lat x long grid for now, but worth re-visiting.
+
+-   method assumes a relatively stationary population during a survey-season (breeding season or non-breeding season, but not applicable to migration monitoring yet)
+
+-   method also assumes that the current distribution/abundance map encompasses the species distribution in 1966.
+
+    -   Note: If the species' range has shifted, areas with monitoring data 50-years ago but no modeled abundance today will be difficult to deal with...
+
+-   starting with BBS survey information, but anticipating a potential application to Christmas Bird Count, eBird trends, and other surveys.
+
+-   Will require a clear taxonomic alignment across various surveys
+
+## downloading eBird seasonal abundance
+
+```{r, message=FALSE, warning=FALSE}
+library(ebirdst)
+library(tidyverse)
+library(bbsBayes2)
+library(terra)
+library(sf)
+library(patchwork)
+
+```
+
+##Example extraction for Connecticut Warbler
+
+Download species data and load seasonal mean abundance
+
+```{r}
+
+species <- "Western Bluebird"
+
+ebirdst_download_status(species)
+abd_seasonal_percent <- load_raster(species = species,
+                                    product = "proportion-population", 
+                                 period = "seasonal", #metric = "mean", 
+                                 resolution = "3km") #3km high resolution
+abd_breeding_percent <- abd_seasonal_percent$breeding
+
+abd_seasonal_abundance <- load_raster(species = species,
+                                    product = "abundance", 
+                                 period = "seasonal", metric = "mean", 
+                                 resolution = "3km") #3km high resolution
+abd_breeding_abundance <- abd_seasonal_abundance$breeding
+
+
+```
+
+Calculate the mean relative abundance within each stratum. First load the degree-block stratification map, and adjust the crs to match the eBird map.
+
+```{r}
+
+latlong_orig <- load_map("latlong") 
+
+latlong <- load_map("latlong")%>% #loading the 1-degree cell strata
+  st_transform(st_crs(abd_breeding_percent)) 
+
+percent_strata <- extract(abd_breeding_percent,
+                          latlong,
+                          fun = sum,
+                          na.rm = TRUE) %>% 
+  mutate(strata_name = latlong$strata_name)
+
+abundance_strata <- extract(abd_breeding_abundance,
+                          latlong,
+                          fun = sum,
+                          na.rm = TRUE) %>% 
+  mutate(strata_name = latlong$strata_name)
+
+
+abundance_max_strata <- extract(abd_breeding_abundance_max,
+                          latlong,
+                          fun = sum,
+                          na.rm = TRUE) %>% 
+  mutate(strata_name = latlong$strata_name)
+
+map_percent_strata <- latlong_orig %>% 
+  inner_join(.,percent_strata,
+             by = "strata_name") %>% 
+  filter(!is.na(breeding),
+         breeding > 0)
+
+
+map_abundance_strata <- latlong_orig %>% 
+  inner_join(.,abundance_strata,
+             by = "strata_name") %>% 
+  filter(!is.na(breeding),
+         breeding > 0)
+
+map_abundance_max_strata <- latlong_orig %>% 
+  inner_join(.,abundance_max_strata,
+             by = "strata_name") %>% 
+  filter(!is.na(breeding),
+         breeding > 0)
+
+
+map_percent <- ggplot()+
+  geom_sf(data = map_percent_strata,
+          aes(fill = breeding))
+map_abundance <- ggplot()+
+  geom_sf(data = map_abundance_strata,
+          aes(fill = breeding))
+map_abundance_max <- ggplot()+
+  geom_sf(data = map_abundance_max_strata,
+          aes(fill = breeding))
+
+print(map_percent / map_abundance)
+
+
+```
+
+### mismatches in range through time
+
+There are some important mismatches between the eBird breeding range and the BBS breeding range (i.e., the regions with BBS observations). These may reflect changes in the species' breeding range through time (e.g., Connecticut Warbler's range shifting North since 1966).
+
+```{r}
+
+bbs_range <- stratify(species,by = "latlong") %>% 
+  prepare_data(.,
+               min_n_routes = 1,
+               min_max_route_years = 1) 
+strata_w_bbs <- bbs_range$meta_strata %>% 
+  select(strata_name) %>% 
+  mutate(bbs = TRUE)
+
+strata_w_eBird <- abundance_strata %>% 
+  filter(breeding > 0) %>% 
+  select(strata_name, breeding) %>% 
+  mutate(ebird = TRUE)
+
+strata_w_either <- full_join(strata_w_bbs,
+                             strata_w_eBird,
+                             by = "strata_name") %>% 
+  mutate(ebird = ifelse(is.na(ebird),FALSE,ebird),
+         bbs = ifelse(is.na(bbs),FALSE,bbs),
+         survey = ifelse(ebird,"ebird","bbs"),
+         survey = ifelse(ebird & bbs,"both",survey))
+
+map_strata_w_either = latlong_orig %>% 
+  inner_join(strata_w_either,
+             by = "strata_name")
+
+overlap_map <- ggplot()+
+  geom_sf(data = load_map("bbs_usgs"),
+          fill = NA)+
+  geom_sf(data = map_strata_w_either,
+          aes(fill = survey))+
+  scale_colour_viridis_d(aesthetics = "fill")+
+  labs(subtitle = paste(species,"strata with BBS observations and eBird \n breeding season relative abundance estimates"))+
+  theme(plot.subtitle = element_text(size = 8))
+
+overlap_map
+```
+
+These mismatches may also reflect a mismatch between the seasonal period of time that eBird considers breeding range and the survey timing of the BBS.
+
+```{r}
+species_breeding <- ebirdst_runs %>% 
+  filter(common_name == species) %>% 
+  select(common_name,breeding_start,breeding_end)
+```
+
+For example, the eBird breeding period for `r species` only includes a two week window of time in late June (`r paste(species_breeding$breeding_start,"to",species_breeding$breeding_end)`).
+
+An alternative to using the breeding season relative abundance is to re-calculate a BBS-season relative abundance using the weekly relative abundance values. Here, I've used just the median relative abundance values and averaged them over the BBS-survey window.
+
+```{r}
+abd_weekly_abundance <- load_raster(path, product = "abundance", 
+                                 period = "weekly", metric = "median", 
+                                 resolution = "hr") #3km high resolution
+
+weeks_in_bbs <- names(abd_weekly_abundance) %>% 
+  lubridate::as_date() 
+  
+weeks_in_bbs <- as.character(weeks_in_bbs[which(weeks_in_bbs > as_date("2021-06-07") & weeks_in_bbs < as_date("2021-07-10"))])
+
+abd_bbs_season_mean <- extract(abd_weekly_abundance,latlong,
+                               fun = sum,
+                               na.rm = TRUE) %>% 
+  select(ID,all_of(weeks_in_bbs)) %>% 
+  group_by(ID) %>% 
+  mutate(breeding_bbs = rowMeans(pick(all_of(weeks_in_bbs)),na.rm = TRUE)) %>% 
+  arrange(ID) %>% 
+  ungroup() %>% 
+  mutate(strata_name = latlong$strata_name) %>% 
+  select(strata_name,breeding_bbs) 
+# this generates a data frame of rows for each cell and a column for the mean seasonal
+
+
+
+strata_w_eBird2 <- abd_bbs_season_mean %>% 
+  filter(breeding_bbs > 0) %>% 
+  select(strata_name, breeding_bbs) %>% 
+  mutate(ebird = TRUE)
+
+strata_w_either <- full_join(strata_w_bbs,
+                             strata_w_eBird2,
+                             by = "strata_name") %>% 
+  mutate(ebird = ifelse(is.na(ebird),FALSE,ebird),
+         bbs = ifelse(is.na(bbs),FALSE,bbs),
+         survey = ifelse(ebird,"ebird","bbs"),
+         survey = ifelse(ebird & bbs,"both",survey))
+
+map_strata_w_either = latlong_orig %>% 
+  inner_join(strata_w_either,
+             by = "strata_name")
+
+overlap_map2 <- ggplot()+
+  geom_sf(data = load_map("bbs_usgs"),
+          fill = NA)+
+  geom_sf(data = map_strata_w_either,
+          aes(fill = survey))+
+  scale_colour_viridis_d(aesthetics = "fill")+
+  labs(subtitle = paste0("strata with BBS observations and eBird relative \n abundance estimates during ",gsub(weeks_in_bbs[1],pattern = "2021-", replacement = ""), " to ", gsub(weeks_in_bbs[length(weeks_in_bbs)],pattern = "2021-", replacement = "")))+
+  theme(plot.subtitle = element_text(size = 8))
+
+overlap_map + overlap_map2 + plot_layout(guides = "collect")
+
+
+```
+
+```{r, echo=FALSE, eval=FALSE}
+pdf(paste0("Figures/",species,"BBS-eBird breeding range overlap.pdf"), width = 11, height = 8.5)
+overlap_map + overlap_map2 + plot_layout(guides = "collect")
+dev.off()
+
+```
+
+For `r paste(species)`, expanding the breeding season beyond the weeks identified in the eBird status and trend products does not seem to improve the overlap between BBS and eBird. This suggests that the mismatch is largely a function of a shift in the species' range since the early years of the BBS surveys. Therefore, a better approach to reonciling the two sources of information may be to create a spatial join, where the strata with BBS observations are asigned the relative abundance values of their nearest neighbour strata that do have relative abundance information.
+
+```{r}
+
+# strata_names with ebird breeding season relative abundance
+strata_w_eBird <- abundance_strata %>% 
+  filter(breeding > 0) %>% 
+  select(strata_name, breeding) %>% 
+  mutate(ebird = TRUE)
+
+# strata_names with BBS monitoring observations
+strata_w_bbs <- bbs_range$meta_strata %>% 
+  select(strata_name) %>% 
+  mutate(bbs = TRUE)
+
+# spatial polygon of strata_w_eBird
+strata_map_eBird <- latlong_orig %>% 
+  inner_join(.,strata_w_eBird, by = "strata_name") %>% 
+  group_by(strata_name) %>% 
+  summarise(breeding = sum(breeding,na.rm = TRUE)) #summarise the breeding abundance across multipolygons
+
+
+# spatial polygon of straat_w_bbs
+strata_map_bbs <- latlong_orig %>% 
+  inner_join(.,strata_w_bbs, by = "strata_name")%>% 
+  group_by(strata_name) %>% 
+  summarise() #unions multi-polygon strata
+
+# calculating areas of polygons so that nearest neighbour substitution can 
+# adjust for different areas
+#calculating the area of each stratum with eBird data
+area_sq_km_ebird = sf::st_area(strata_map_eBird)/1e6
+strata_map_eBird <- strata_map_eBird %>% 
+  mutate(area_sq_km_ebird = area_sq_km_ebird)
+
+#calculating the area of each stratum with BBS data
+area_sq_km = sf::st_area(strata_map_bbs)/1e6
+strata_map_bbs <- strata_map_bbs %>% 
+  mutate(area_sq_km = area_sq_km)
+
+# identifying the strata with only BBS data
+strata_map_fill <- strata_map_bbs %>% 
+  rename(strata_name_true = strata_name) %>% 
+  filter(!strata_name_true %in% strata_map_eBird$strata_name) %>%
+  sf::st_join(.,strata_map_eBird,
+              join = st_nearest_feature) %>% #nearest neighbour join to strata with eBird data
+  rename(strata_name_nearest = strata_name,
+         strata_name = strata_name_true) %>% 
+  group_by(strata_name) %>% 
+  mutate(breeding = as.numeric(breeding*(area_sq_km/area_sq_km_ebird))) %>% # area adjustment
+  select(strata_name,breeding)
+
+#appending the nearest neighbour substituted abundances to the ebird abundance map
+final_ebird_abundance_strata <- strata_map_eBird %>% 
+  bind_rows(.,strata_map_fill) %>% 
+  select(strata_name,breeding) %>% 
+  mutate(percent_breeding = breeding/sum(breeding),
+         with_bbs = ifelse(strata_name %in% strata_w_bbs$strata_name,
+                           TRUE,FALSE)) 
+## species aou number for concise file naming
+aou <- search_species(species)[1,"aou"]
+
+
+saveRDS(final_ebird_abundance_strata,paste0("output/saved_ebird_breeding_abundance_",aou,".rds"))
+
+
+# percent of new breeding abundance covered by BBS
+p_covered <- final_ebird_abundance_strata %>% 
+  filter(with_bbs) %>% 
+  summarise(percent_breeding = sum(percent_breeding)) %>% 
+  sf::st_drop_geometry()
+
+# map showing the relative species distribution and BBS coverage
+test_map <- ggplot()+
+  geom_sf(data = final_ebird_abundance_strata,
+          aes(fill = percent_breeding))+
+  geom_sf(data = strata_map_bbs,
+          fill = NA,
+          colour = grey(0.8),
+          linewidth = 0.7)+
+  theme_bw()+
+  scale_fill_viridis_c()
+
+test_map
+
+```
+
+By filling in the abundance values for each stratum where there are BBS observations outside of the modeled breeding range for the species, we can generate a complete relative abundance surface that covers all of the available BBS locations, and does so using the area-corrected nearest neighbour value.
+
+If we consider each cell within the range of the BBS surveys "covered" by BBS monitoring, then `r 100*round(p_covered$percent_breeding,2)`% of the species' population in 2021 is covered.

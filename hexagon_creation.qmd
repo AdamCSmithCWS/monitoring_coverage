@@ -1,0 +1,110 @@
+---
+title: "Hexagonal Grid Creation"
+format: pdf
+editor: visual
+---
+
+## Regular Hexagonal Grid for Western Hemisphere
+
+The goal is to generate a regular grid with which we can calculate the spatial coverage of different monitoring programs.
+
+```{r, setup}
+library(rnaturalearth)
+library(tidyverse)
+library(sf)
+```
+
+Using base layers from `rnaturalearth` and the package `sf` to generate a single hexagonal grid.
+
+```{r, download}
+
+land <- ne_download(type = "land", category = "physical",
+                    returnclass = "sf",
+                    scale = 10) 
+
+lakes <- ne_download(type = "lakes", category = "physical",
+                    returnclass = "sf",
+                    scale = 50) %>% 
+  #st_crop(.,xmin = -170, xmax = -30,
+  #        ymin = -60,ymax = 80) %>% 
+  #st_buffer(.,0) %>% 
+  st_transform(.,crs = 8858) %>% 
+  st_make_valid()%>% 
+  st_combine()%>% 
+  st_make_valid()
+
+tmp1 <- ggplot()+geom_sf(data = lakes)
+tmp1
+
+
+
+islands <- ne_download(type = "minor_islands", category = "physical",
+                    returnclass = "sf",
+                    scale = 10) %>% 
+  st_crop(.,xmin = -170, xmax = -30,
+          ymin = -60,ymax = 80) %>% 
+  st_transform(.,crs = 8858) %>% 
+  st_combine()
+
+
+
+west_hemi <- land %>% 
+  st_crop(.,xmin = -170, xmax = -30,
+          ymin = -60,ymax = 80) %>% 
+  st_transform(.,crs = 8858) %>% 
+  st_union(.,islands) %>% 
+  st_buffer(., dist = 4000) %>%  ## buffer coast by 4 km to increase the overlap with coastal survey locations
+  west_hemi %>%     
+st_difference(.,lakes) 
+ #%>% #"+proj=laea +x_0=0 +y_0=0 +lon_0=-100 +lat_0=0")
+  
+
+
+
+
+```
+
+```{r}
+
+
+
+# tst <- ggplot()+
+#   geom_sf(data = tmp2)
+# tst
+
+grid_spacing <- 120000  # size of squares, in units of the CRS (i.e. meters for lae)
+
+poly_grid <- st_make_grid(west_hemi, 
+                          square = F, 
+                          cellsize = c(grid_spacing, grid_spacing)) %>% # the grid, covering bounding box
+  st_sf() # 
+
+crd <- st_coordinates(st_centroid(poly_grid))
+poly_grid$hex_name <- paste(round(crd[,"X"]),round(crd[,"Y"]),sep = "_")
+
+
+poly_grid2 <- st_intersection(poly_grid,west_hemi) # 
+
+poly_grid <- poly_grid2 %>% 
+  group_by(hex_name) %>% 
+  summarise() %>% 
+  mutate(area_km2 = as.numeric(st_area(poly_grid2)/1e6)) 
+
+ poly_grid <- readRDS("data/hexagonal_grid_west_hemisphere_120km.rds") %>% 
+  group_by(hex_name) %>% 
+  summarise() 
+ poly_grid <- poly_grid %>% 
+  mutate(area_km2 = as.numeric(st_area(poly_grid)/1e6))
+
+#tmp <- poly_grid %>% 
+#  filter(!is.na(scalerank))
+tst <- ggplot()+
+  geom_sf(data = west_hemi,
+          fill = NA,
+          linewidth = 0.1) 
+
+tst
+
+saveRDS(poly_grid,"data/hexagonal_grid_west_hemisphere_120km.rds")
+
+```
