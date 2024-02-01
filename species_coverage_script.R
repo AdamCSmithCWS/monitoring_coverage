@@ -22,16 +22,44 @@ bbs_strata <- load_map("prov_state") %>%
 re_run <- FALSE
 min_p_area <- 0.25 # minimum proportion of a grid cell with species range
 # grid cells with < min_p_area are not considered part of the species' range
+min_nyears <- 2 # minimum number of years of species observations on at least one BBS route
+# within a grid cell to consider that cell "covered"
+selected_species <- TRUE
+
+if(selected_species){
+
+species_sel <- c("American Robin",
+                 "European Starling",
+                 "American Kestrel",
+                 "Nelson's Sparrow",
+                 "Western Grebe",
+                 "Curve-billed Thrasher",
+                 "Caspian Tern",
+                 "Lesser Yellowlegs",
+                 "Peregrine Falcon",
+                 "Connecticut Warbler")
+
+species_list2 <- species_list %>%
+  filter(english %in% species_sel)
+
+
+}
+
+
+pdf_title <- ifelse(selected_species,
+                    "coverage_selection.pdf",
+                    "coverage_summary.pdf")
+
 
 # species loop ------------------------------------------------------------
 
-pdf("figures/coverage_summary.pdf",
+pdf(paste0("figures/",pdf_title),
     width = 11,
     height = 8.5)
-for(i in rev(1:nrow(species_list))){
+for(i in rev(1:nrow(species_list2))){
 
-  species <- as.character(species_list[i,"english"])
-  aou <- as.integer(species_list[i,"aou"])
+  species <- as.character(species_list2[i,"english"])
+  aou <- as.integer(species_list2[i,"aou"])
   if(grepl("(all forms)",species)){
     speciesn <- gsub(" (all forms)",replacement = "",
                      species,fixed = TRUE)
@@ -44,10 +72,10 @@ down <- try(ebirdst_download_status(speciesn,
             silent = TRUE)
 
 if(class(down) == "try-error"){
-  species_list[i,"eBird_range_data"] <- "unavailable"
+  species_list2[i,"eBird_range_data"] <- "unavailable"
   next
   }
-species_list[i,"eBird_range_data"] <- "downloaded"
+species_list2[i,"eBird_range_data"] <- "downloaded"
 
 abd_seasonal_range <- load_ranges(species = speciesn, #metric = "mean",
                                   resolution = "27km")  #3km high resolution
@@ -101,7 +129,7 @@ bbs_range_strat <- stratify(species,by = "hexagons",
 
 bbs_range <- prepare_data(bbs_range_strat,
                           min_n_routes = 1,
-                          min_max_route_years = 1)
+                          min_max_route_years = min_nyears)
 
 strata_w_bbs <- bbs_range$meta_strata %>%
   select(strata_name) %>%
@@ -173,14 +201,60 @@ uncovered <- coverage_sum %>%
   filter(!covered) %>%
   select(area_km2) %>%
   unlist()
+
+canada <- bbs_strata %>%
+  filter(country == "Canada") %>%
+  select(country)
+coverage_sum_can <- coverage_alt %>%
+  st_join(.,canada,
+          join = st_intersects,
+          left = FALSE) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(covered) %>%
+  summarise(area_km2 = sum(area_km2))
+
+covered_can <- coverage_sum_can %>%
+  filter(covered) %>%
+  select(area_km2) %>%
+  unlist()
+uncovered_can <- coverage_sum_can %>%
+  filter(!covered) %>%
+  select(area_km2) %>%
+  unlist()
+
+US <- bbs_strata %>%
+  filter(country == "United States of America") %>%
+  select(country)
+coverage_sum_us <- coverage_alt %>%
+  st_join(.,US,
+          join = st_intersects,
+          left = FALSE) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(covered) %>%
+  summarise(area_km2 = sum(area_km2))
+covered_us <- coverage_sum_us %>%
+  filter(covered) %>%
+  select(area_km2) %>%
+  unlist()
+uncovered_us <- coverage_sum_us %>%
+  filter(!covered) %>%
+  select(area_km2) %>%
+  unlist()
 cov_overall <- signif(covered/sum(covered,uncovered),3)
-cov_cap <- paste("Based on land area of cells covered vs uncovered.",
-                 "Assuming that any grid cell with monitoring data \n
-                 is completely covered and only grid cells with >",
-                 (min_p_area)*100,"% overlap with the species' range
-                 map are included in the uncovered range")
-tit <- paste(species,"=",cov_overall*100,"%")
-stit <- paste(season_sel,"season coverage of BBS surveys with species' data")
+cov_overall_us <- signif(covered_us/sum(covered_us,uncovered_us),3)
+cov_overall_can <- signif(covered_can/sum(covered_can,uncovered_can),3)
+cov_cap <- paste("Based on western hemisphere land area of 12,000km^2
+hexagonal grid cells. Assuming that any grid cell
+                with monitoring data is completely covered.
+                Range is both the land area of all grid cells with >",
+                 (min_p_area)*100,"% overlap
+                 with the species' range layer from eBird, and all grid cells with
+                 monitoring data for > ", min_nyears," years.")
+tit <- paste(species,"=",cov_overall*100,"% overall")
+stit <- paste0(str_to_title(season_sel)," season coverage of BBS surveys with \n at least 2 years of species observations \n",
+              cov_overall_us*100,"% coverage of range in in USA \n",cov_overall_can*100,"% coverage of range in Canada")
 xlimits <- st_bbox(coverage_alt)[c("xmin","xmax")]
 ylimits <- st_bbox(coverage_alt)[c("ymin","ymax")]
 
@@ -201,8 +275,10 @@ alt_coverage <- ggplot()+
   theme_bw()
 print(alt_coverage)
 
+if(!re_run){
 saveRDS(coverage_alt,file = paste0("output/",
                                    aou,"_coverage_surface.rds"))
+}
 }
 
 
