@@ -4,7 +4,6 @@
 library(ebirdst)
 library(tidyverse)
 library(bbsBayes2)
-library(terra)
 library(sf)
 library(patchwork)
 
