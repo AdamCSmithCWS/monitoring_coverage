@@ -29,10 +29,10 @@ library(ebirdst)
 library(tidyverse)
 library(bbsBayes2)
 library(sf)
+library(terra)
 library(patchwork)
 
-hex_grid <- readRDS("data/hexagonal_grid_west_hemisphere_120km.rds") %>%
-  rename(strata_name = hex_name)
+hex_grid <- readRDS("data/hexagonal_grid_west_hemisphere_120km.rds") 
 west_hemi <- st_union(hex_grid)
 eBird_crs <- readRDS("data/eBird_crs.rds")
 west_crop <- west_hemi %>%
@@ -328,26 +328,22 @@ overlap_map <- ggplot()+
   geom_sf(data = abd_range,
           colour = "red",
           fill = NA)+
+  coord_sf(xlim = xlimits,
+           ylim = ylimits)+
   scale_colour_viridis_d(aesthetics = "fill")+
-  labs(subtitle = paste(species,"strata with BBS observations and/or eBird \n breeding season range"))+
   theme(plot.subtitle = element_text(size = 8))+
   theme_bw()
 ```
 
 ```{r}
 #| fig-width: 7
-#| fig-height: 6
-
+#| fig-height: 3.5
 #| fig-cap: "Connecticut Warbler coverage: Grid cells with BBS monitoring data but outside the species' eBird range (purple), cells that overlap the species' range polygon from eBird status and trends but with no BBS monitoring data (yellow), and cells with both monitoring data and overlapping the species' range"
-#| 
+
 overlap_map
 ```
 
-
-
-{{< pagebreak >}}
-
-### Reconcile
+#### Reconciling the mismatches 
 
 One approach to reconciling the two sources of information is to assume that any grid-cell with observations from either source is part of the species' range, and that any cell that intersects either the range map or observations from a the monitoring is part of the species' range. However, this will likely generate artifacts of low coverage at the edge of a species' range, where many cells may overlap a very small portion of the range map. To reduce this range-edge effect, we can set a minimum threshold overlap between the range and the grid-cell, such as 25% (the threshold applied above in the American Robin example).
 
@@ -458,7 +454,7 @@ plboth <- simple_coverage / alt_coverage + plot_layout(guides = "collect")
 Removing the grid cells with < 25% overlap of the species' range polygon increases the estimate of the overall coverage by `r (cov_overall1-cov_overall2)*100`%, from `r (cov_overall1)*100` within the edge cells included to `r (cov_overall2)*100`% with edge cells excluded.
 ```{r}
 #| fig-width: 7
-#| fig-height: 8
+#| fig-height: 7
 #| fig-cap: "Connecticut Warbler coverage: The top panel considers any grid cells that overlap the species' range polygon as being part of the range. The bottom panel exludes any grid cell with less than 25% of its area overlapped by the range polygon."
 #| 
 plboth
@@ -904,6 +900,369 @@ alt_coverage <- ggplot()+
 print(alt_coverage)
 
 ```
+
+{{< pagebreak >}}
+### Temporal variation in monitoring
+
+```{r}
+
+
+species <- "American Robin"
+aou <- as.integer(bbsBayes2::search_species(species)["aou"])
+
+
+season_sel <- "breeding"
+  if(grepl("(all forms)",species)){
+    speciesn <- gsub(" (all forms)",replacement = "",
+                     species,fixed = TRUE)
+  }else{
+    speciesn <- species
+  }
+abd_seasonal_range <- load_ranges(species = speciesn, #metric = "mean",
+                                  resolution = "27km")  #3km high resolution
+
+
+season_sel <- "breeding"
+
+if(season_sel %in% abd_seasonal_range$season){
+abd_range <- abd_seasonal_range %>%
+  filter(season == season_sel)
+}else{
+  season_sel <- "resident"
+  abd_range <- abd_seasonal_range %>%
+    filter(season == season_sel)
+}
+
+
+
+abd_range <- abd_range %>%
+  st_make_valid() %>%
+  st_crop(.,west_crop) %>%
+  st_make_valid() %>%
+  st_transform(.,crs = st_crs(hex_grid))
+
+cov_overall <- vector("list",2)
+names(cov_overall) <- as.character(c(1970,2010))
+cov_overall_can <- cov_overall
+cov_overall_us <- cov_overall
+
+coverage_alt2 <- NULL
+for(dec in c(1970,2010)){
+hex_range <- st_intersection(abd_range,hex_grid) %>%
+  st_make_valid()
+
+hex_range <- hex_range %>%
+  mutate(area_km2 = as.numeric(st_area(hex_range)/1e6))
+
+strata_w_eBird_range <- hex_range %>%
+  select(strata_name) %>%
+  mutate(ebird = TRUE)
+
+
+# Survey data -------------------------------------------------------------
+
+
+bbs_range_strat <- stratify(species,by = "hexagons",
+                            strata_custom = hex_grid,
+                            return_omitted = TRUE)
+
+bbs_range <- prepare_data(bbs_range_strat,
+                          min_n_routes = 1,
+                          min_max_route_years = min_nyears,
+                          min_year = dec,
+                          max_year = dec+10)
+
+strata_w_bbs <- bbs_range$meta_strata %>%
+  select(strata_name) %>%
+  mutate(bbs = TRUE)
+
+
+
+# combine surveyed and range ----------------------------------------------
+
+
+strata_w_either <- full_join(strata_w_bbs,
+                             strata_w_eBird_range,
+                             by = "strata_name") %>%
+  mutate(ebird = ifelse(is.na(ebird),FALSE,ebird),
+         bbs = ifelse(is.na(bbs),FALSE,bbs),
+         survey = ifelse(ebird,"ebird","bbs"),
+         survey = ifelse(ebird & bbs,"both",survey))
+
+
+
+# coverage map and calculation --------------------------------------------
+
+coverage <- hex_grid %>%
+  inner_join(strata_w_either,
+             by = "strata_name") %>%
+  mutate(covered = ifelse(survey %in% c("both","bbs"),
+                          TRUE,FALSE)) %>%
+  st_make_valid()
+
+
+
+# area of range according to eBird
+full_hex_w_range <- hex_grid %>%
+  rename(area_km2_stratum = area_km2) %>%
+  filter(strata_name %in% strata_w_either$strata_name) %>%
+  st_make_valid()
+
+
+full_hex_in_range <- st_intersection(full_hex_w_range,
+                                     abd_range) %>%
+  select(strata_name,area_km2_stratum) %>%
+  st_make_valid()
+
+p_area_in_range <- full_hex_in_range %>%
+  mutate(area_km2_in_range = as.numeric(st_area(full_hex_in_range)/1e6),
+         range = "inside",
+         p_area_in_range = area_km2_in_range/area_km2_stratum) %>%
+  st_drop_geometry() %>%
+  select(strata_name,range,p_area_in_range)
+
+drop_outside_range <- p_area_in_range %>%
+  filter(p_area_in_range < min_p_area)
+
+coverage_alt <- coverage %>%
+  filter(survey %in% c("both","bbs") |
+           !(survey == "ebird" & strata_name %in% drop_outside_range$strata_name)) %>% 
+  mutate(decade = paste0(dec,"s"))
+
+
+coverage_sum <- coverage_alt %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(covered) %>%
+  summarise(area_km2 = sum(area_km2))
+covered <- coverage_sum %>%
+  filter(covered) %>%
+  select(area_km2) %>%
+  unlist()
+uncovered <- coverage_sum %>%
+  filter(!covered) %>%
+  select(area_km2) %>%
+  unlist()
+
+canada <- bbs_strata %>%
+  filter(country == "Canada") %>%
+  select(country)
+coverage_sum_can <- coverage_alt %>%
+  st_join(.,canada,
+          join = st_intersects,
+          left = FALSE) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(covered) %>%
+  summarise(area_km2 = sum(area_km2))
+
+covered_can <- coverage_sum_can %>%
+  filter(covered) %>%
+  select(area_km2) %>%
+  unlist()
+uncovered_can <- coverage_sum_can %>%
+  filter(!covered) %>%
+  select(area_km2) %>%
+  unlist()
+
+US <- bbs_strata %>%
+  filter(country == "United States of America") %>%
+  select(country)
+coverage_sum_us <- coverage_alt %>%
+  st_join(.,US,
+          join = st_intersects,
+          left = FALSE) %>%
+  st_drop_geometry() %>%
+  ungroup() %>%
+  group_by(covered) %>%
+  summarise(area_km2 = sum(area_km2))
+covered_us <- coverage_sum_us %>%
+  filter(covered) %>%
+  select(area_km2) %>%
+  unlist()
+uncovered_us <- coverage_sum_us %>%
+  filter(!covered) %>%
+  select(area_km2) %>%
+  unlist()
+cov_overall[[as.character(dec)]] <- signif(covered/sum(covered,uncovered),3)
+cov_overall_us[[as.character(dec)]]  <- signif(covered_us/sum(covered_us,uncovered_us),3)
+cov_overall_can[[as.character(dec)]]  <- signif(covered_can/sum(covered_can,uncovered_can),3)
+
+coverage_alt2 <- bind_rows(coverage_alt2,coverage_alt)
+
+  
+}
+
+xlimits <- st_bbox(coverage_alt2)[c("xmin","xmax")]
+ylimits <- st_bbox(coverage_alt2)[c("ymin","ymax")]
+
+  
+ alt_coverage <- ggplot()+
+  geom_sf(data = west_hemi)+
+  geom_sf(data = bbs_strata)+
+  geom_sf(data = coverage_alt2,
+          aes(fill = covered))+
+  geom_sf(data = abd_range,
+          fill = NA,
+          colour = "red")+
+  coord_sf(xlim = xlimits,
+           ylim = ylimits)+
+  scale_fill_viridis_d()+
+  theme_bw()+
+   facet_grid(rows = vars(decade))
+
+```
+
+An added complication to assessing the spatial coverage of a monitoring program is that for many programs, the spatial coverage has changed over time. For example, the spatial coverage of the BBS for American Robin in the 2010s (`r paste(100*as.numeric(cov_overall[[1]]))`%) is larger than it was in the 1970s (`r paste(100*as.numeric(cov_overall[[2]]))`%).
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6
+#| fig-cap: "BBS coverage of American Robin range in the 1970s and the 2010s"
+#| 
+print(alt_coverage)
+
+```
+
+
+{{< pagebreak >}}
+### Spatial variation in abundance
+
+```{r}
+
+species <- "Barn Swallow"
+aou <- as.integer(bbsBayes2::search_species(species)["aou"])
+
+
+
+  if(grepl("(all forms)",species)){
+    speciesn <- gsub(" (all forms)",replacement = "",
+                     species,fixed = TRUE)
+  }else{
+    speciesn <- species
+  }
+
+ebirdst_download_status(speciesn,
+                        download_abundance = TRUE)
+
+abd_seasonal_abundance <- load_raster(species = species,
+                                    product = "abundance", 
+                                 period = "seasonal", metric = "mean", 
+                                 resolution = "3km") #3km high resolution
+abd_breeding_abundance <- abd_seasonal_abundance$breeding 
+
+hex_grid_trans <- hex_grid %>% 
+  st_transform(.,st_crs(abd_breeding_abundance))
+
+abundance_strata <- extract(abd_breeding_abundance,
+                          hex_grid_trans,
+                          fun = sum,
+                          na.rm = TRUE) %>% 
+  mutate(strata_name = hex_grid_trans$strata_name)
+
+
+
+map_abundance_strata <- hex_grid %>% 
+  inner_join(.,abundance_strata,
+             by = "strata_name") %>% 
+  filter(!is.na(breeding),
+         breeding > 0)
+
+map_abundance <- ggplot()+
+  geom_sf(data = map_abundance_strata,
+          aes(fill = breeding))
+
+
+
+
+strata_w_eBird_range <- map_abundance_strata %>%
+  select(strata_name) %>%
+  mutate(ebird = TRUE)
+
+
+# Survey data -------------------------------------------------------------
+
+
+bbs_range_strat <- stratify(species,by = "hexagons",
+                            strata_custom = hex_grid,
+                            return_omitted = TRUE)
+
+bbs_range <- prepare_data(bbs_range_strat,
+                          min_n_routes = 1,
+                          min_max_route_years = min_nyears)
+
+strata_w_bbs <- bbs_range$meta_strata %>%
+  select(strata_name) %>%
+  mutate(bbs = TRUE)
+
+
+# combine surveyed and range ----------------------------------------------
+
+
+strata_w_either <- full_join(strata_w_bbs,
+                             strata_w_eBird_range,
+                             by = "strata_name") %>%
+  mutate(ebird = ifelse(is.na(ebird),FALSE,ebird),
+         bbs = ifelse(is.na(bbs),FALSE,bbs),
+         survey = ifelse(ebird,"ebird","bbs"),
+         survey = ifelse(ebird & bbs,"both",survey))
+
+
+
+# coverage map and calculation --------------------------------------------
+
+coverage <- map_abundance_strata %>%
+  full_join(strata_w_either,
+             by = "strata_name") %>%
+  mutate(covered = ifelse(survey %in% c("both","bbs"),
+                          TRUE,FALSE)) %>%
+  st_make_valid()
+
+
+xlimits <- st_bbox(coverage)[c("xmin","xmax")]
+ylimits <- st_bbox(coverage)[c("ymin","ymax")]
+
+bbs_cov <- coverage %>% 
+  filter(covered) %>% 
+  st_union()
+
+yl <- scales::viridis_pal()(10)[10]
+
+coverage_map <- ggplot()+
+  geom_sf(data = west_hemi)+
+  geom_sf(data = bbs_strata)+
+  geom_sf(data = coverage,
+          aes(fill = breeding))+
+  geom_sf(data = bbs_cov,
+          colour = yl,
+          fill = NA)+
+  coord_sf(xlim = xlimits,
+           ylim = ylimits)+
+  scale_fill_viridis_c()+
+  scale_colour_viridis_d()+
+  theme_bw()
+
+coverage_sum <- coverage %>% 
+  st_drop_geometry() %>% 
+  group_by(covered) %>% 
+  summarise(abundance = sum(breeding,na.rm = TRUE))
+
+
+abund_cov <- round(as.numeric(coverage_sum[2,2]/sum(coverage_sum[,2])),3)*100
+
+```
+For monitoring coverage, we could expand the inferential goal beyond the spatial coverage of a species' range, to consider the relative abundance of the species across its range. For example if a particular grid cell includes 5% of a species population, monitoring coverage within that grid cell is likely more important than monitoring coverage within a grid cell that includes 0.1% of the species' population.
+The map below shows the BBS coverage of Barn Swallow overlayed on the eBird relative abundance surface. Accounting for the spatial variation in relative abundance, `r abund_cov`% of the species' population is covered by BBS, whereas using range information 69.5% of the species' range is covered.  
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6
+#| fig-cap: "BBS coverage of Barn Swallow relative abundance. The cell colours are scaled to the eBird estimated breeding population relative abundance in each grid cell. Yellow-outlined cells are covered (i.e., have some BBS monitoring data for Barn Swallow)"
+#| 
+print(coverage_map)
+
+```
+
 
 
 {{< pagebreak >}}

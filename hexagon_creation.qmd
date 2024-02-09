@@ -94,7 +94,10 @@ poly_grid <- poly_grid2 %>%
   group_by(hex_name) %>% 
   summarise() 
  poly_grid <- poly_grid %>% 
-  mutate(area_km2 = as.numeric(st_area(poly_grid)/1e6))
+  mutate(area_km2 = as.numeric(st_area(poly_grid)/1e6))%>%
+  rename(strata_name = hex_name) %>% 
+  filter(area_km2 > 0)%>% 
+  st_cast(.,to = "MULTIPOLYGON") 
 
 #tmp <- poly_grid %>% 
 #  filter(!is.na(scalerank))
